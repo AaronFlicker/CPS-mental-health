@@ -96,16 +96,9 @@ admits <- dbGetQuery(con, "
                   ,p.city
                   ,p.state
                   ,p.zip
-                  ,p.county
                   ,r.disch_icd_1
                   ,r.disch_dx_name_1
-		              ,r.disch_icd_2
-		              ,r.disch_dx_name_2
-		              ,r.adt_pat_class
-		              ,r.department_id
-		              ,r.department_name
 		              ,ccs.default_ccsr_category_description_ip as category
-		              ,ccs.icd_10_cm_diagnosis_chapter as chapter
   FROM hpceclarity.bmi.readmissions r
 		INNER JOIN hpceclarity.bmi.patient p
 		  ON r.pat_id = p.pat_id
@@ -133,46 +126,57 @@ admits <- dbGetQuery(con, "
 		                              'PA3N', 'PA3S', 'PA3SW', 'PA3W', 'PB2-200') 
 		      AND r.hosp_admsn_time > '2020-05-10')
     )
-                     ") 
-
-educ <- dbGetQuery(con, "
-  SELECT DISTINCT
-              p.pat_id
-              ,educ.mrn
-              ,educ.enc_id
-              ,educ.dispo
-              ,CAST(educ.arrvdate AS DATE) AS arrvdate
-              ,CAST(educ.dschdate AS DATE) AS dschdate
-				      ,educ.site
-				      ,educ.room_name
-				      ,educ.acuity
-    FROM hpceclarity.dbo.chmc_ed_daily_jcaho educ
-      INNER JOIN hpceclarity.bmi.patient p
-        ON educ.mrn = p.pat_mrn_id
-	   WHERE educ.arrvdate BETWEEN '2/1/2019' AND '6/30/2022'
-	     AND p.birth_date BETWEEN '2/1/2019' AND '3/31/2021'
-	     AND DATEDIFF(DD, p.birth_date, educ.arrvdate) <= 458
-	     AND educ.dispo not in ('Transfer to CCM ED')
-		   AND educ.dispo not like '%LWBS%'
-		   AND educ.dispo <> 'ED Dismiss - Never Arrived'
-                   ") |>
-  inner_join(select(gp, pat_id), multiple = "all") |>
+                     ") |>
   mutate(
-    UrgentCare = ifelse(
-      str_detect(site, "URGENT") | str_detect(room_name, "URG") |
-        str_detect(room_name, "MAS") | str_detect(room_name, "UC") |
-        str_detect(room_name, "AND") | str_detect(room_name, "GRN"), 1, 0
-    ),
-    HighUrgency = ifelse(
-      UrgentCare == 1 | is.na(acuity) |
-        acuity %in% c("Triage Level 4", "Triage Level 5"), 0, 1
-    ),
-    UrgentCare = coalesce(UrgentCare, 0),
-    HighUrgency = coalesce(HighUrgency, 0)
-  ) |>
-  unique()
-         
-matched <- inner_join(match, admits, multiple = "all") |>
+    dispo = NA,
+    AdmitID = pat_enc_csn_id,
+    EDID = NA
+    )
+
+ed <- dbGetQuery(con, "
+  SELECT p.pat_id
+		,ed.enc_id as pat_enc_csn_id
+		,ed.dispo
+		,CAST(ed.arrvdate AS DATE) AS contact_date
+		,ed.diagnosis1 as disch_dx_name_1
+		,ed.current_icd10_list as disch_icd_1
+		,p.gender as Gender
+		,p.add_line_1
+		,p.add_line_2
+    ,p.city
+		,p.state
+		,p.zip
+		,p.birth_date
+		,rem.mapped_ethnic_group_c as Ethnicity
+    ,rem.mapped_race as Race
+    ,ccs.default_ccsr_category_description_ip as category
+  FROM hpceclarity.dbo.chmc_ed_daily_jcaho ed
+    INNER JOIN hpceclarity.bmi.patient p
+      ON ed.mrn = p.pat_mrn_id
+	  INNER JOIN hpceclarity.bmi.y_chmc_race_ethnicity_mapping rem
+	  	ON p.pat_id = rem.pat_id
+	  LEFT JOIN temptable.dbo.icd10_ccs_2021 ccs
+		  ON ed.current_icd10_list = ccs.icd_10_cm_code
+	WHERE arrvdate >= '1/1/2019'
+		AND dispo not like '%LWBS%'
+		AND dispo <> 'ED Dismiss - Never Arrived'
+		AND site not like '%URGENT%'
+		AND room_name not like '%URG%'
+		AND room_name not like '%MAS%'
+		AND room_name not like '%UC%'
+		AND room_name not like '%AND%'
+		AND room_name not like '%GRN%'
+		AND (current_icd10_list like 'F%'
+			OR current_icd10_list like 'R45%')
+                 ") |>
+  mutate(
+    AdmitID = NA,
+    EDID = pat_enc_csn_id
+  )
+
+admit_ed <- rbind(admits, ed)
+
+matched <- inner_join(match, admit_ed, multiple = "all") |>
   mutate(
     Race = case_when(
       Ethnicity == "Hispanic" ~ Ethnicity,
@@ -240,11 +244,14 @@ coded <- filter(geocoded, !is.na(lat)) |>
 uncoded2 <- filter(uncoded, is.na(lat)) |>
   select(-c(lat, long)) |>
   mutate(
-    AddressNew = str_replace(Address, "Hoolster", "Hollister"),
+    AddressNew = str_replace(Address, "Highline", "High Line"),
+    AddressNew = str_replace(AddressNew, "Hoolster", "Hollister"),
     AddressNew = str_replace(AddressNew, "Western", "Westwood"),
     AddressNew = str_replace(AddressNew, "Woodlen", "Woodland"),
     AddressNew = str_replace(AddressNew, "Wymong", "Wyoming"),
-    AddressNew = str_replace(AddressNew, "Glen St", "Glen Este")
+    AddressNew = str_replace(AddressNew, "Glen St", "Glen Este"),
+    AddressNew = str_replace(AddressNew, "Werd", "Werk"),
+    AddressNew = str_replace(AddressNew, "Global", "Gobel")
   ) |>
   geocode(
     street = AddressNew,
@@ -261,10 +268,10 @@ coded <- filter(uncoded2, !is.na(lat)) |>
 hooded1 <- filter(uncoded2, is.na(lat)) |>
   mutate(
     Neighborhood = case_when(
-      str_detect(Address, "Ashtabula") ~ "Sayler Park",
+      str_detect(Address, "Lilly") ~ "Bond Hill",
       str_detect(Address, "Martin") ~ "Cheviot",
       str_detect(Address, "Berchwood") ~ "Colerain Township",
-      TRUE ~ "Bond Hill"
+      TRUE ~ "Out of district"
     )
   ) |>
   select(AddID2, Neighborhood)
@@ -318,22 +325,11 @@ hooded <- rbind(hooded1, hooded2) |>
 matched2 <- ungroup(matched) |>
   left_join(hooded) |>
   mutate(
-    Neighborhood = coalesce(Neighborhood, "Foster care"),
-    Condition = case_when(
-      category == "Other specified and unspecified mood disorders" ~ "Mood",
-      category == "Other specified substance-related disorders" ~ "Substance",
-      TRUE ~ category
+    Neighborhood = case_when(
+      is.na(add_line_1) ~ "Out of district",
+      is.na(Neighborhood) ~ "Foster care",
+      TRUE ~ Neighborhood
       )
-    ) |>
-  separate_wider_delim(
-    Condition, 
-    delim = " ", 
-    names = "Condition",
-    too_many = "drop"
-    ) |>
-  mutate(
-    Condition = str_remove(Condition, ","),
-    Condition = str_remove(Condition, "-"),
     )
 
 studentid <- matched2 |>
@@ -341,7 +337,7 @@ studentid <- matched2 |>
   group_by(School, Race, Gender) |>
   mutate(StudentID = row_number()) |>
   inner_join(matched2, multiple = "all") |>
-  select(pat_id:StudentID, pat_enc_csn_id, category, Neighborhood, contact_date)
+  select(pat_id:StudentID, contact_date, category, AdmitID, EDID, Neighborhood)
 
 full_set <- left_join(students, studentid, multiple = "all") |>
   ungroup() |>
@@ -357,13 +353,14 @@ full_set <- left_join(students, studentid, multiple = "all") |>
     Neighborhood = str_replace(Neighborhood, "North ", "N. "),
     Neighborhood = str_replace(Neighborhood, "South ", "S. "),
     Neighborhood = str_replace(Neighborhood, "East ", "E. "),
-    Neighborhood = str_replace(Neighborhood, "West ", "W. "),
+    #Neighborhood = str_replace(Neighborhood, "West ", "W. "),
     Neighborhood = str_replace(Neighborhood, "Township", "Twp."),
-    Admissions = ifelse(is.na(pat_enc_csn_id), 0, 1),
-    PatientID = ifelse(Admissions == 1, PersonalID, NA)
+    Admissions = ifelse(is.na(AdmitID), 0, 1),
+    EDVisits = ifelse(is.na(EDID), 0, 1),
+    PatientID = ifelse(Admissions == 1 | EDVisits == 1, PersonalID, NA)
     )
 
-#write_csv(full_set, "for_pbi5.csv")
+#write_csv(full_set, "for_pbi6.csv")
 
 grade <- read_excel(
   "oct_hdcnt_fy23.xls",
