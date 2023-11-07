@@ -41,13 +41,17 @@ schools <- read_excel(
     School = str_replace(School, "Rising Stars", "RS"),
     School = case_when(
       School == "College Hill Fundamental Academy" ~ "College Hill Academy",
-      School == "Fairview-Clifton German Language School" ~ "Fairview Clifton School",
+      School == "Fairview-Clifton German Language School" ~ 
+        "Fairview Clifton School",
       School == "George Hays-Jennie Porter School" ~ "Hays Porter School",
-      School == "Spencer Center for Gifted and Exceptional Students" ~ "Spencer Center",
+      School == "Spencer Center for Gifted and Exceptional Students" ~ 
+        "Spencer Center",
       School == "Leap Academy at North Fairmount" ~ "LEAP Academy",
       School == "Clifton Area Neighborhood School" ~ "CANS School",                  
-      School == "James N Gamble Montessori Elementary School" ~ "Gamble Montessori Elementary",
-      School == "RS at Aiken New Tech/College Hill" ~ "Rising Stars Academy Aiken New Tech",
+      School == "James N Gamble Montessori Elementary School" ~ 
+        "Gamble Montessori Elementary",
+      School == "RS at Aiken New Tech/College Hill" ~ 
+        "Rising Stars Academy Aiken New Tech",
       School == "RS at Cheviot/Westwood" ~ "RS at Cheviot Westwood",
       School == "North Avondale Montessori School" ~ "North Avondale Montessori",
       School == "Pleasant Ridge Montessori School" ~ "Pleasant Ridge Montessori",
@@ -99,6 +103,8 @@ admits <- dbGetQuery(con, "
                   ,r.disch_icd_1
                   ,r.disch_dx_name_1
 		              ,ccs.default_ccsr_category_description_ip as category
+		              ,1 as Admission
+		              ,0 as ED
   FROM hpceclarity.bmi.readmissions r
 		INNER JOIN hpceclarity.bmi.patient p
 		  ON r.pat_id = p.pat_id
@@ -126,18 +132,14 @@ admits <- dbGetQuery(con, "
 		                              'PA3N', 'PA3S', 'PA3SW', 'PA3W', 'PB2-200') 
 		      AND r.hosp_admsn_time > '2020-05-10')
     )
-                     ") |>
-  mutate(
-    dispo = NA,
-    AdmitID = pat_enc_csn_id,
-    EDID = NA
-    )
+                     ")
 
 ed <- dbGetQuery(con, "
   SELECT p.pat_id
 		,ed.enc_id as pat_enc_csn_id
 		,ed.dispo
 		,CAST(ed.arrvdate AS DATE) AS contact_date
+		,CAST(ed.dschdate AS DATE) AS dschdate
 		,ed.diagnosis1 as disch_dx_name_1
 		,ed.current_icd10_list as disch_icd_1
 		,p.gender as Gender
@@ -150,6 +152,8 @@ ed <- dbGetQuery(con, "
 		,rem.mapped_ethnic_group_c as Ethnicity
     ,rem.mapped_race as Race
     ,ccs.default_ccsr_category_description_ip as category
+    ,0 as Admission
+    ,1 as ED
   FROM hpceclarity.dbo.chmc_ed_daily_jcaho ed
     INNER JOIN hpceclarity.bmi.patient p
       ON ed.mrn = p.pat_mrn_id
@@ -168,31 +172,19 @@ ed <- dbGetQuery(con, "
 		AND room_name not like '%GRN%'
 		AND (current_icd10_list like 'F%'
 			OR current_icd10_list like 'R45%')
-                 ") |>
-  mutate(
-    AdmitID = NA,
-    EDID = pat_enc_csn_id
-  )
+                 ") 
 
-admit_ed <- rbind(admits, ed)
+admit_match <- inner_join(admits, match)
+ed_match <- inner_join(ed, match)
 
-matched <- inner_join(match, admit_ed, multiple = "all") |>
-  mutate(
-    Race = case_when(
-      Ethnicity == "Hispanic" ~ Ethnicity,
-      str_detect(Race, "Black") ~ "Black",
-      TRUE ~ "Other"
-    )
-  ) |>
-  inner_join(school_type)
-
-adds <- matched |>
-  distinct(add_line_1, city, state, zip) |>
-  ungroup() |>
+adds <- select(admit_match, add_line_1, city, state, zip) |>
+  rbind(select(ed_match, add_line_1, city, state, zip)) |>
+  unique() |>
   filter(str_starts(add_line_1, "222 ", negate = TRUE)) |>
   mutate(AddID1 = row_number())
 
-matched <- left_join(matched, adds) 
+admit_add <- left_join(admit_match, adds)
+ed_add <- left_join(ed_match, adds)
 
 adds <- adds |>
   mutate(
@@ -218,6 +210,8 @@ to_geocode <- adds |>
   mutate(AddID2 = row_number())
 
 adds <- left_join(adds, to_geocode)
+admit_add <- left_join(admit_add, adds)
+ed_add <- left_join(ed_add, adds)
 
 geocoded <- geocode(
   to_geocode,
@@ -270,8 +264,8 @@ hooded1 <- filter(uncoded2, is.na(lat)) |>
     Neighborhood = case_when(
       str_detect(Address, "Lilly") ~ "Bond Hill",
       str_detect(Address, "Martin") ~ "Cheviot",
-      str_detect(Address, "Berchwood") ~ "Colerain Township",
-      TRUE ~ "Out of district"
+      str_detect(Address, "Berchwood") ~ "Out of district",
+      TRUE ~ "Unknown"
     )
   ) |>
   select(AddID2, Neighborhood)
@@ -290,15 +284,19 @@ muni_lines <- county_subdivisions(
   select(Municipality, geometry)
 
 munis <- st_join(coded, muni_lines, left = FALSE)
+hooded2 <- anti_join(coded, as_tibble(munis)) |>
+  as_tibble() |>
+  select(AddID2) |>
+  mutate(Neighborhood = "Unknown") 
 
-hooded2 <- filter(munis, Municipality != "Cincinnati") |>
+hooded3 <- filter(munis, Municipality != "Cincinnati") |>
   rename(Neighborhood = Municipality) |>
   as_tibble() |>
   select(AddID2, Neighborhood)
 
 cinci <- filter(munis, Municipality == "Cincinnati")
 
-hooded3 <- neigh_sna |> 
+hooded4 <- neigh_sna |> 
   mutate(
     SHAPE = st_transform(SHAPE, crs = "NAD83"),
     Neighborhood = case_when(
@@ -318,26 +316,47 @@ hooded3 <- neigh_sna |>
 
 hooded <- rbind(hooded1, hooded2) |>
   rbind(hooded3) |>
+  rbind(hooded4) |>
   right_join(adds, multiple = "all") |>
-  mutate(Neighborhood = coalesce(Neighborhood, "Out of district")) |>
-  select(AddID1, Neighborhood)
+  select(AddID1, Neighborhood) 
 
-matched2 <- ungroup(matched) |>
-  left_join(hooded) |>
-  mutate(
-    Neighborhood = case_when(
-      is.na(add_line_1) ~ "Out of district",
-      is.na(Neighborhood) ~ "Foster care",
-      TRUE ~ Neighborhood
-      )
+admit_final <- left_join(admit_add, hooded) |>
+  mutate(Neighborhood = coalesce(Neighborhood, "Unknown")) |>
+  select(pat_enc_csn_id:contact_date, category:ED, School, Neighborhood)
+
+ed_final <- left_join(ed_add, hooded) |>
+  mutate(Neighborhood = coalesce(Neighborhood, "Unknown")) |>
+  select(
+    pat_id, 
+    pat_enc_csn_id, 
+    contact_date, 
+    Gender, 
+    birth_date:ED, 
+    School, 
+    Neighborhood
     )
 
-studentid <- matched2 |>
+hospital <- rbind(admit_final, ed_final) |>
+  group_by(pat_enc_csn_id) |>
+  mutate(ED = max(ED)) |>
+  filter(Admission == max(Admission)) |>
+  ungroup() |>
+  mutate(
+    Race = case_when(
+      Ethnicity == "Hispanic" ~ Ethnicity,
+      Race == "Black or African American" ~ "Black",
+      TRUE ~ "Other"
+      )
+    ) |>
+  select(-Ethnicity)
+  
+studentid <- hospital |>
+  ungroup() |>
   distinct(pat_id, School, Race, Gender) |>
   group_by(School, Race, Gender) |>
   mutate(StudentID = row_number()) |>
-  inner_join(matched2, multiple = "all") |>
-  select(pat_id:StudentID, contact_date, category, AdmitID, EDID, Neighborhood)
+  inner_join(hospital, multiple = "all")
+
 
 full_set <- left_join(students, studentid, multiple = "all") |>
   ungroup() |>
@@ -345,19 +364,12 @@ full_set <- left_join(students, studentid, multiple = "all") |>
     RN = as.character(row_number()),
     PersonalID = coalesce(pat_id, RN)
   ) |>
-  select(-c(RN, StudentID, pat_id)) |>
+  select(-c(RN, StudentID, pat_id, birth_date)) |>
   inner_join(school_type) |>
   mutate(
     School = str_remove(School, " School"),
     School = str_remove(School, " HS"),
-    Neighborhood = str_replace(Neighborhood, "North ", "N. "),
-    Neighborhood = str_replace(Neighborhood, "South ", "S. "),
-    Neighborhood = str_replace(Neighborhood, "East ", "E. "),
-    #Neighborhood = str_replace(Neighborhood, "West ", "W. "),
-    Neighborhood = str_replace(Neighborhood, "Township", "Twp."),
-    Admissions = ifelse(is.na(AdmitID), 0, 1),
-    EDVisits = ifelse(is.na(EDID), 0, 1),
-    PatientID = ifelse(Admissions == 1 | EDVisits == 1, PersonalID, NA)
+    PatientID = ifelse(Admission == 1 | ED == 1, PersonalID, NA)
     )
 
 #write_csv(full_set, "for_pbi6.csv")
@@ -367,7 +379,15 @@ grade <- read_excel(
   sheet = "fy23_hdcnt_bldg",
   col_types = c(
     "skip", "text", "skip", "text", "skip", rep("numeric", 13), rep("skip", 14)),
-  col_names = c(NA, "District", NA, "School", NA, paste0("Grade", c("K", 1:12)), rep(NA, 14)),
+  col_names = c(
+    NA, 
+    "District", 
+    NA, 
+    "School", 
+    NA, 
+    paste0("Grade", c("K", 1:12)), 
+    rep(NA, 14)
+    ),
   skip = 1
   ) |>
   filter(District == "Cincinnati Public Schools") |>
@@ -380,7 +400,7 @@ grade <- read_excel(
     ) |>
   mutate(Grade = str_remove(Grade, "Grade"))
 
-grade_admit <- matched2 |>
+grade_admit <- hospital |>
   mutate(
     SchoolYear = case_when(
       contact_date >= "2023-09-01" ~ 2023,
@@ -390,18 +410,23 @@ grade_admit <- matched2 |>
       contact_date >= "2019-09-01" ~ 2019,
       TRUE ~ 2018
     ),
-    SchoolAge = floor(as.numeric(as.Date(paste(SchoolYear, "09", "01", sep = "-"))-birth_date)/365.25),
+    SchoolAge = floor(
+      as.numeric(as.Date(paste(SchoolYear, "09", "01", sep = "-"))-birth_date)/
+        365.25
+      ),
     Grade = ifelse(SchoolAge < 6, "K", SchoolAge-5)
   ) |>
   group_by(Grade) |>
   summarise(
     Patients = length(unique(pat_id)),
-    Admissions = n()
+    Admissions = sum(Admission),
+    ED = sum(ED)
   ) |>
   full_join(grade) |>
   mutate(
     PatientRate = 1000*Patients/Students,
     AdmissionRate = 1000*Admissions/Students,
     GradeNo = ifelse(Grade == "K", 1, as.numeric(Grade)+1)
-    )
+    ) |>
+  filter(GradeNo < 14)
 write_csv(grade_admit, "grade_for_pbi.csv")
