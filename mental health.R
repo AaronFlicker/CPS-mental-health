@@ -420,12 +420,14 @@ grade_admit <- hospital |>
   summarise(
     Patients = length(unique(pat_id)),
     Admissions = sum(Admission),
-    ED = sum(ED)
+    ED = sum(ED),
+    Encounters = n()
   ) |>
   full_join(grade) |>
   mutate(
     PatientRate = 1000*Patients/Students,
     AdmissionRate = 1000*Admissions/Students,
+    EncounterRate = 1000*Encounters/Students,
     GradeNo = ifelse(Grade == "K", 1, as.numeric(Grade)+1)
     ) |>
   filter(GradeNo < 14)
