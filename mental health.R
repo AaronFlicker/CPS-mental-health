@@ -7,7 +7,7 @@ library(sf)
 library(cincy)
 options(tigris_use_cache = TRUE)
 
-match <- read_excel("Matched1024.xlsx", col_types = c(rep("text", 3), "skip")) 
+match <- read_excel("Matched_1208.xlsx", col_types = c(rep("text", 3), "skip")) 
 
 school_type <- read_delim(
   "school.txt", 
@@ -132,7 +132,7 @@ admits <- dbGetQuery(con, "
 		                              'PA3N', 'PA3S', 'PA3SW', 'PA3W', 'PB2-200') 
 		      AND r.hosp_admsn_time > '2020-05-10')
     )
-                     ")
+")
 
 ed <- dbGetQuery(con, "
   SELECT p.pat_id
@@ -172,7 +172,7 @@ ed <- dbGetQuery(con, "
 		AND room_name not like '%GRN%'
 		AND (current_icd10_list like 'F%'
 			OR current_icd10_list like 'R45%')
-                 ") 
+") 
 
 admit_match <- inner_join(admits, match)
 ed_match <- inner_join(ed, match)
@@ -245,7 +245,14 @@ uncoded2 <- filter(uncoded, is.na(lat)) |>
     AddressNew = str_replace(AddressNew, "Wymong", "Wyoming"),
     AddressNew = str_replace(AddressNew, "Glen St", "Glen Este"),
     AddressNew = str_replace(AddressNew, "Werd", "Werk"),
-    AddressNew = str_replace(AddressNew, "Global", "Gobel")
+    AddressNew = str_replace(AddressNew, "Global", "Gobel"),
+    AddressNew = str_replace(AddressNew, "Booster", "Brewster"),
+    AddressNew = str_replace(AddressNew, "Hammer", "Hamer"),
+    AddressNew = str_replace(AddressNew, "Perdue", "Purdue"),
+    AddressNew = str_replace(AddressNew, "Dixon", "Dickson"),
+    AddressNew = str_replace(AddressNew, "Vinehill", "Vinedale"),
+    AddressNew = str_replace(AddressNew, "Northe ", "N "),
+    AddressNew = str_replace(AddressNew, "Wn", "W North")
   ) |>
   geocode(
     street = AddressNew,
@@ -264,7 +271,10 @@ hooded1 <- filter(uncoded2, is.na(lat)) |>
     Neighborhood = case_when(
       str_detect(Address, "Lilly") ~ "Bond Hill",
       str_detect(Address, "Martin") ~ "Cheviot",
-      str_detect(Address, "Berchwood") ~ "Out of district",
+      str_detect(Address, "Perdue") ~ "Avondale",
+      str_detect(Address, "Berchwood") | str_detect(Address, "Mcewing") |
+        str_detect(Address, "Miami") | str_detect(Address, "Highline") |
+        City != "Cincinnati" ~ "Out of district",
       TRUE ~ "Unknown"
     )
   ) |>
@@ -287,7 +297,7 @@ munis <- st_join(coded, muni_lines, left = FALSE)
 hooded2 <- anti_join(coded, as_tibble(munis)) |>
   as_tibble() |>
   select(AddID2) |>
-  mutate(Neighborhood = "Unknown") 
+  mutate(Neighborhood = "Out of district") 
 
 hooded3 <- filter(munis, Municipality != "Cincinnati") |>
   rename(Neighborhood = Municipality) |>
@@ -356,7 +366,6 @@ studentid <- hospital |>
   group_by(School, Race, Gender) |>
   mutate(StudentID = row_number()) |>
   inner_join(hospital, multiple = "all")
-
 
 full_set <- left_join(students, studentid, multiple = "all") |>
   ungroup() |>
@@ -432,3 +441,18 @@ grade_admit <- hospital |>
     ) |>
   filter(GradeNo < 14)
 write_csv(grade_admit, "grade_for_pbi.csv")
+
+
+patients <- filter(full_set, !is.na(PatientID))
+
+school <- full_set |>
+  group_by(School, Race, Gender) |>
+  summarise(
+    Students = length(unique(PersonalID)),
+    Patients = length(unique(PatientID[!is.na(PatientID)])),
+    Admissions = length(unique(pat_enc_csn_id[!is.na(pat_enc_csn_id)]))
+  ) |>
+  mutate(
+    PatientRate = 1000*Patients/Students,
+    AdmissionRate = 1000*Admissions/Students
+  )
